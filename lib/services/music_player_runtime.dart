@@ -15,6 +15,7 @@ import 'package:spotiflac_android/services/music_player_service.dart';
 import 'package:spotiflac_android/services/network_metadata_service.dart';
 import 'package:spotiflac_android/services/network_storage_service.dart';
 import 'package:spotiflac_android/services/platform_bridge.dart';
+import 'package:spotiflac_android/services/download_request_payload.dart';
 import 'package:spotiflac_android/services/playback_notification.dart';
 import 'package:spotiflac_android/services/player_widget_service.dart';
 import 'package:spotiflac_android/services/source_deletion_events.dart';
@@ -32,6 +33,7 @@ class PlaybackDependencies {
     this.readMetadata = PlatformBridge.readFileMetadata,
     this.readNetworkMetadata = _readNetworkMetadata,
     this.resolveNetworkSource = _resolveNetworkSource,
+    this.resolveTemporaryPlaybackSource = _resolveTemporaryPlaybackSource,
     this.initializeHandler = _initializeAudioHandler,
     this.createPersonalization = AutoplayPersonalization.new,
     AppStateDatabase? sessionDatabase,
@@ -58,6 +60,8 @@ class PlaybackDependencies {
   readMetadata;
   final Future<Map<String, dynamic>> Function(String) readNetworkMetadata;
   final Future<String> Function(String) resolveNetworkSource;
+  final Future<String?> Function(Map<String, dynamic>)
+  resolveTemporaryPlaybackSource;
   final Future<MusicPlayerHandler> Function(MusicPlayerHandler Function())
   initializeHandler;
   final MethodChannel notificationChannel;
@@ -88,6 +92,24 @@ class PlaybackDependencies {
       NetworkMetadataService.instance.read(source);
   static Future<String> _resolveNetworkSource(String source) =>
       NetworkStorageService.instance.resolve(source);
+  static Future<String?> _resolveTemporaryPlaybackSource(
+    Map<String, dynamic> request,
+  ) async {
+    final response = await PlatformBridge.downloadByStrategy(
+      payload: DownloadRequestPayload.forTemporaryPlayback(request),
+      useExtensions: true,
+      useFallback: false,
+    );
+    if (response['success'] != true) {
+      throw StateError(
+        response['error']?.toString() ??
+            'The provider could not prepare this track for playback.',
+      );
+    }
+    final path = response['file_path']?.toString().trim() ?? '';
+    return path.isEmpty ? null : path;
+  }
+
   static Future<MusicPlayerHandler> _initializeAudioHandler(
     MusicPlayerHandler Function() builder,
   ) => AudioService.init(

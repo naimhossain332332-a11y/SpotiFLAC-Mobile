@@ -82,6 +82,8 @@ void setPlaybackAutomationOptions({
   ),
 );
 
+bool _usesBuiltInPlayer(String mode) => mode == 'internal' || mode == 'online';
+
 void setAutoMixEnabled(bool enabled) => musicPlayerRuntime.configure(
   musicPlayerRuntime.settings.copyWith(autoMix: enabled),
 );
@@ -161,6 +163,7 @@ class PlayableMedia {
   final bool explicit;
   final String? genre;
   final bool autoplay;
+  final Map<String, dynamic>? temporaryPlaybackRequest;
 
   const PlayableMedia({
     required this.id,
@@ -178,9 +181,13 @@ class PlayableMedia {
     this.explicit = false,
     this.genre,
     this.autoplay = false,
+    this.temporaryPlaybackRequest,
   });
 
   bool get isContentUri => source.startsWith('content://');
+  bool get isTemporaryPlayback =>
+      source.startsWith('temporary-playback://') &&
+      temporaryPlaybackRequest != null;
   bool get isNetwork =>
       const {'network', 'http', 'https'}.contains(Uri.tryParse(source)?.scheme);
 
@@ -202,6 +209,8 @@ class PlayableMedia {
     if (explicit) 'explicit': true,
     if (genre != null) 'genre': genre,
     if (autoplay) 'autoplay': true,
+    if (temporaryPlaybackRequest != null)
+      'temporaryPlaybackRequest': temporaryPlaybackRequest,
   };
 
   static PlayableMedia? fromJson(
@@ -245,6 +254,9 @@ class PlayableMedia {
       explicit: parseExplicitFlag(json['explicit']) == true,
       genre: json['genre'] as String?,
       autoplay: json['autoplay'] == true,
+      temporaryPlaybackRequest: json['temporaryPlaybackRequest'] is Map
+          ? Map<String, dynamic>.from(json['temporaryPlaybackRequest'] as Map)
+          : null,
     );
   }
 
@@ -376,8 +388,8 @@ class MusicPlayerHandler extends BaseAudioHandler
       unawaited(_autoMix.cancel());
     }
     // USB changes apply at the next source boundary, without raising volume.
-    if ((previous.playerMode == 'internal') !=
-            (settings.playerMode == 'internal') ||
+    if (_usesBuiltInPlayer(previous.playerMode) !=
+            _usesBuiltInPlayer(settings.playerMode) ||
         previous.pauseOnMute != settings.pauseOnMute ||
         previous.playOnHeadphonesConnected !=
             settings.playOnHeadphonesConnected ||
@@ -398,14 +410,14 @@ class MusicPlayerHandler extends BaseAudioHandler
     AutoplayLibraryLoader? autoplayLibraryLoader,
   }) : _runtime = runtime ?? musicPlayerRuntime {
     _sourceCache = ContentUriPlaybackCache(
-      copy: PlatformBridge.copyContentUriToTemp,
+      copy: _copyPlaybackCacheSource,
       isDisposed: () => _disposed,
       isPinned: (path) =>
           path == _activeResolvedPath || _autoMix.pinnedPaths.contains(path),
       onResolveError: (error) =>
-          _log.e('Failed to resolve content URI for playback: $error'),
+          _log.e('Failed to prepare temporary playback source: $error'),
       onDeleteError: (error) =>
-          _log.w('Failed to delete SAF playback temp file: $error'),
+          _log.w('Failed to delete playback cache temp file: $error'),
     );
     _sessionWriter = PlaybackSessionWriter(
       database: _dependencies.sessionDatabase,
@@ -539,7 +551,8 @@ class MusicPlayerHandler extends BaseAudioHandler
 
   void _configurePersonalization() {
     final enabled =
-        _settings.autoplayPersonalization && _settings.playerMode == 'internal';
+        _settings.autoplayPersonalization &&
+        _usesBuiltInPlayer(_settings.playerMode);
     _runtime.personalization.setEnabled(enabled);
     if (enabled && _index >= 0 && _index < _media.length) {
       _runtime.personalization.begin(_learningTrack(_media[_index]));
@@ -700,11 +713,11 @@ class MusicPlayerHandler extends BaseAudioHandler
   void _refreshPlaybackAutomation() {
     if (_disposed) return;
     final pauseOnMute =
-        _settings.playerMode == 'internal' &&
+        _usesBuiltInPlayer(_settings.playerMode) &&
         _settings.pauseOnMute &&
         !_settings.usbBitPerfect;
     final playOnHeadphonesConnected =
-        _settings.playerMode == 'internal' &&
+        _usesBuiltInPlayer(_settings.playerMode) &&
         _settings.playOnHeadphonesConnected;
     unawaited(
       _playbackAutomation.configure(
@@ -1032,17 +1045,20 @@ class MusicPlayerHandler extends BaseAudioHandler
         return;
       }
       final media = _media[index];
-      var resolved = media.isContentUri
+      var resolved = media.isContentUri || media.isTemporaryPlayback
           ? _sourceCache.cachedPath(media.source)
           : media.source;
       ContentUriPlaybackLease? playbackLease;
-      if (resolved == null && media.isContentUri) {
-        try {
-          playbackLease = await PlatformBridge.openContentUriPlaybackLease(
-            media.source,
-          );
-          resolved = playbackLease?.path;
-        } catch (_) {}
+      if (resolved == null &&
+          (media.isContentUri || media.isTemporaryPlayback)) {
+        if (media.isContentUri) {
+          try {
+            playbackLease = await PlatformBridge.openContentUriPlaybackLease(
+              media.source,
+            );
+            resolved = playbackLease?.path;
+          } catch (_) {}
+        }
         resolved ??= await _resolveSource(media);
       }
       if (resolved == null) return;
@@ -1077,8 +1093,59 @@ class MusicPlayerHandler extends BaseAudioHandler
         return null;
       }
     }
-    if (!media.isContentUri) return media.source;
-    return _sourceCache.resolve(media.source);
+    if (media.isTemporaryPlayback || media.isContentUri) {
+      return _sourceCache.resolve(media.source);
+    }
+    return media.source;
+  }
+
+  Future<String?> _copyPlaybackCacheSource(String source) async {
+    if (!source.startsWith('temporary-playback://')) {
+      return PlatformBridge.copyContentUriToTemp(source);
+    }
+    for (final media in _media) {
+      if (media.source == source && media.isTemporaryPlayback) {
+        return _dependencies.resolveTemporaryPlaybackSource(
+          media.temporaryPlaybackRequest!,
+        );
+      }
+    }
+    return null;
+  }
+
+  Future<void> _prefetchNextTemporaryPlayback(int generation) async {
+    if (_disposed || generation != _playRequestGeneration || _media.isEmpty) {
+      return;
+    }
+    var nextIndex = _index + 1;
+    if (nextIndex >= _media.length &&
+        _repeatMode == AudioServiceRepeatMode.all) {
+      nextIndex = 0;
+    }
+    if (nextIndex < 0 || nextIndex >= _media.length || nextIndex == _index) {
+      return;
+    }
+    final next = _media[nextIndex];
+    if (!next.isTemporaryPlayback) return;
+    final source = next.source;
+    final path = await _sourceCache.resolve(source);
+    if (path == null) return;
+    if (_disposed || generation != _playRequestGeneration) {
+      await _sourceCache.invalidate(source);
+      return;
+    }
+    await _cleanupPendingResolvedPaths();
+  }
+
+  Future<void> _clearTemporaryPlaybackCache() async {
+    final sources = _media
+        .where((media) => media.isTemporaryPlayback)
+        .map((media) => media.source)
+        .toSet();
+    for (final source in sources) {
+      await _sourceCache.invalidate(source);
+    }
+    await _cleanupPendingResolvedPaths();
   }
 
   Future<void> _cleanupPendingResolvedPaths() => _sourceCache.releaseUnpinned();
@@ -1267,6 +1334,10 @@ class MusicPlayerHandler extends BaseAudioHandler
     int initialIndex = 0,
   }) async {
     if (items.isEmpty) return;
+    final previousTemporarySources = _media
+        .where((media) => media.isTemporaryPlayback)
+        .map((media) => media.source)
+        .toSet();
     _autoplay.reset();
     _playRequestGeneration++;
     _media
@@ -1280,6 +1351,9 @@ class MusicPlayerHandler extends BaseAudioHandler
     if (_shuffle) _shuffleQueue();
     _markSessionQueueChanged();
     _playHistory.clear();
+    for (final source in previousTemporarySources) {
+      unawaited(_sourceCache.invalidate(source));
+    }
     queue.add(List<MediaItem>.unmodifiable(_queueItems));
     await _playIndex(_index);
   }
@@ -1627,7 +1701,9 @@ class MusicPlayerHandler extends BaseAudioHandler
         unawaited(_loadNetworkMetadata(media, generation));
       }
       _pendingRestorePosition = null;
-      _activeResolvedPath = usingLocalSafCopy ? resolved : null;
+      _activeResolvedPath = usingLocalSafCopy || media.isTemporaryPlayback
+          ? resolved
+          : null;
       await _cleanupPendingResolvedPaths();
       if (!_isCurrentPlayRequest(generation, media)) return;
       // Plain file paths were already published before loading. Re-publishing
@@ -1641,6 +1717,7 @@ class MusicPlayerHandler extends BaseAudioHandler
       _broadcastState();
       _lastPeriodicPersistAt = DateTime.now();
       unawaited(_persistSession(position: effectiveStartPosition));
+      unawaited(_prefetchNextTemporaryPlayback(generation));
       // Some files do not emit onDurationChanged reliably (stuck at 0:00);
       // poll the engine for the real duration as a fallback.
       unawaited(_ensureDurationKnown(media, generation));
@@ -1995,6 +2072,7 @@ class MusicPlayerHandler extends BaseAudioHandler
     _sourceReady = false;
     _activeResolvedPath = null;
     await _cleanupPendingResolvedPaths();
+    await _clearTemporaryPlaybackCache();
     if (generation != _playRequestGeneration || _disposed) return;
     _index = -1;
     _pausedByInterruption = false;
@@ -2217,6 +2295,7 @@ Future<void> restorePlaybackSession(MusicPlayerRuntime runtime) async {
       if (media == null) continue;
       if (!media.isContentUri &&
           !media.isNetwork &&
+          !media.isTemporaryPlayback &&
           !await File(media.source).exists()) {
         continue;
       }

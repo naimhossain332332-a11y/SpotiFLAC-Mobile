@@ -127,6 +127,71 @@ class DownloadRequestPayload {
     this.networkConcurrencyLimit = 3,
   });
 
+  factory DownloadRequestPayload.forTemporaryPlayback(
+    Map<String, dynamic> json,
+  ) {
+    String text(String key, [String fallback = '']) =>
+        json[key]?.toString() ?? fallback;
+    int integer(String key, [int fallback = 0]) {
+      final value = json[key];
+      return value is num ? value.toInt() : fallback;
+    }
+
+    return DownloadRequestPayload(
+      contractVersion: integer('contract_version', nativeWorkerContractVersion),
+      isrc: text('isrc'),
+      service: text('service'),
+      downloadProvider: text('download_provider'),
+      providerTrackId: text('provider_track_id'),
+      spotifyId: text('spotify_id'),
+      trackName: text('track_name'),
+      artistName: text('artist_name'),
+      albumName: text('album_name'),
+      albumArtist: text('album_artist'),
+      coverUrl: text('cover_url'),
+      coverMaxDimension: integer('cover_max_dimension'),
+      outputDir: '',
+      filenameFormat: text(
+        'filename_format',
+        '{provider} - {provider_id} - {quality} - {title}',
+      ),
+      quality: text('quality', 'LOSSLESS'),
+      embedMetadata: false,
+      artistTagMode: text('artist_tag_mode', 'joined'),
+      embedLyrics: false,
+      embedReplayGain: false,
+      postProcessingEnabled: false,
+      autoConvertDownloads: false,
+      trackNumber: integer('track_number'),
+      playlistPosition: integer('playlist_position'),
+      discNumber: integer('disc_number'),
+      totalTracks: integer('total_tracks', 1),
+      totalDiscs: integer('total_discs'),
+      releaseDate: text('release_date'),
+      durationMs: integer('duration_ms'),
+      source: text('source'),
+      genre: text('genre'),
+      label: text('label'),
+      copyright: text('copyright'),
+      composer: text('composer'),
+      comment: text('comment'),
+      explicit: json['explicit'] == true,
+      albumType: text('album_type'),
+      upc: text('upc'),
+      tidalId: text('tidal_id'),
+      qobuzId: text('qobuz_id'),
+      deezerId: text('deezer_id'),
+      useExtensions: true,
+      useFallback: false,
+      storageMode: 'app',
+      outputExt: text('output_ext'),
+      requiresContainerConversion:
+          json['requires_container_conversion'] == true,
+      songLinkRegion: text('songlink_region', 'US'),
+      networkConcurrencyLimit: integer('network_concurrency_limit', 3),
+    );
+  }
+
   Map<String, dynamic> toJson() {
     return {
       'contract_version': contractVersion,

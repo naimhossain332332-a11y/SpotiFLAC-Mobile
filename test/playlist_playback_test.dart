@@ -396,6 +396,7 @@ void main() {
         settingsProvider.overrideWith(_Settings.new),
         musicPlayerControllerProvider.overrideWithValue(player),
         playbackProvider.overrideWith(() => playback),
+        extensionProvider.overrideWith(_DownloadExtensions.new),
       ],
     );
     addTearDown(container.dispose);
@@ -413,6 +414,29 @@ void main() {
         'Last',
       ]);
       expect(player.index, player.queue.length - 1);
+    },
+  );
+
+  test(
+    'online mode queues the list and marks missing tracks for temporary playback',
+    () async {
+      container.read(settingsProvider.notifier).setPlayerMode('online');
+
+      await container
+          .read(playbackProvider.notifier)
+          .playTrackList(_tracks, startIndex: 2);
+
+      expect(player.queue.map((item) => item.title), [
+        'First',
+        'Unavailable',
+        'Selected',
+        'Last',
+      ]);
+      expect(player.index, 2);
+      expect(player.queue[0].source, 'content://library/first');
+      expect(player.queue[1].isTemporaryPlayback, isTrue);
+      expect(player.queue[1].temporaryPlaybackRequest?['service'], 'example');
+      expect(player.queue[1].temporaryPlaybackRequest?['output_dir'], '');
     },
   );
 

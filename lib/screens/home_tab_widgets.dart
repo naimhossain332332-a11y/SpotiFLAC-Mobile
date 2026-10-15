@@ -371,9 +371,23 @@ class _TrackItemWithStatus extends ConsumerWidget {
     required bool isInHistory,
     required bool isInLocalLibrary,
   }) async {
+    final settings = ref.read(settingsProvider);
+    if (settings.playerMode == 'online') {
+      try {
+        await ref.read(playbackProvider.notifier).playTrackList([track]);
+      } catch (error) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(error.toString().replaceFirst('Exception: ', '')),
+            ),
+          );
+        }
+      }
+      return;
+    }
     if (isQueued) return;
 
-    final settings = ref.read(settingsProvider);
     final allowExistingDownload =
         settings.allowQualityVariants || !settings.deduplicateDownloads;
 

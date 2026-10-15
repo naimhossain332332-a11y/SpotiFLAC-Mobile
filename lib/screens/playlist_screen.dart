@@ -11,6 +11,7 @@ import 'package:spotiflac_android/services/platform_bridge.dart';
 import 'package:spotiflac_android/l10n/l10n.dart';
 import 'package:spotiflac_android/models/track.dart';
 import 'package:spotiflac_android/providers/download_queue_provider.dart';
+import 'package:spotiflac_android/providers/playback_provider.dart';
 import 'package:spotiflac_android/providers/extension_provider.dart';
 import 'package:spotiflac_android/providers/library_collections_provider.dart';
 import 'package:spotiflac_android/utils/image_cache_utils.dart';
@@ -449,6 +450,9 @@ class _PlaylistScreenState extends ConsumerState<PlaylistScreen>
               index: index,
               child: TrackListTile(
                 track: track,
+                onPlayOnline: () => ref
+                    .read(playbackProvider.notifier)
+                    .playTrackList(_tracks, startIndex: index),
                 isInHistory: isInHistory,
                 isSelectionMode: isSelectionMode,
                 isSelected: selectedIds.contains(selectionId),
