@@ -6488,6 +6488,14 @@
   "@libraryBuiltInPreviewPlayerSubtitle": {
     "description": "Subtitle for built-in preview player option"
   },
+  "libraryOnlinePlayback": "Online playback",
+  "@libraryOnlinePlayback": {
+    "description": "Setting option to play provider tracks through a temporary cache"
+  },
+  "libraryOnlinePlaybackSubtitle": "Prepare the full track temporarily, then prefetch only the next song. Use Download to keep it offline.",
+  "@libraryOnlinePlaybackSubtitle": {
+    "description": "Subtitle explaining temporary online playback and how to save tracks permanently"
+  },
   "libraryBuiltInPlayerInfo": "The built-in player is a preview tool for checking local tracks quickly. Use an external music player for actual listening.",
   "@libraryBuiltInPlayerInfo": {
     "description": "Info note explaining the built-in player is for previews only"

@@ -1384,6 +1384,37 @@ void main() {
         payload.qualityVariantCollisionOnly,
       );
     });
+
+    test('temporary playback requests never target the offline library', () {
+      const request = DownloadRequestPayload(
+        service: 'example',
+        downloadProvider: 'example',
+        providerTrackId: 'provider-track',
+        trackName: 'Song',
+        artistName: 'Artist',
+        albumName: 'Album',
+        outputDir: '/downloads',
+        filenameFormat: '{provider} - {provider_id} - {title}',
+        quality: 'LOSSLESS',
+        embedMetadata: true,
+        embedLyrics: true,
+        outputExt: '.flac',
+      );
+
+      final temporary = DownloadRequestPayload.forTemporaryPlayback(
+        request.toJson(),
+      );
+
+      expect(temporary.service, 'example');
+      expect(temporary.providerTrackId, 'provider-track');
+      expect(temporary.outputDir, isEmpty);
+      expect(temporary.storageMode, 'app');
+      expect(temporary.useExtensions, isTrue);
+      expect(temporary.useFallback, isFalse);
+      expect(temporary.embedMetadata, isFalse);
+      expect(temporary.embedLyrics, isFalse);
+      expect(temporary.outputExt, '.flac');
+    });
   });
 
   group('extension download transfer policy', () {

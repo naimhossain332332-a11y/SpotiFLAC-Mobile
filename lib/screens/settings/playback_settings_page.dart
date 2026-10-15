@@ -81,6 +81,17 @@ class _PlaybackSettingsPageState extends ConsumerState<PlaybackSettingsPage> {
                   onTap: () => ref
                       .read(settingsProvider.notifier)
                       .setPlayerMode('internal'),
+                ),
+                SettingsItem(
+                  icon: Icons.cloud_download_outlined,
+                  title: context.l10n.libraryOnlinePlayback,
+                  subtitle: context.l10n.libraryOnlinePlaybackSubtitle,
+                  trailing: settings.playerMode == 'online'
+                      ? Icon(Icons.check, color: colorScheme.primary)
+                      : null,
+                  onTap: () => ref
+                      .read(settingsProvider.notifier)
+                      .setPlayerMode('online'),
                   showDivider: false,
                 ),
               ],
@@ -138,7 +149,7 @@ class _PlaybackSettingsPageState extends ConsumerState<PlaybackSettingsPage> {
                   title: context.l10n.autoplayFromLibrary,
                   subtitle: context.l10n.autoplayDescription,
                   value: settings.autoplay,
-                  enabled: settings.playerMode == 'internal',
+                  enabled: settings.playerMode != 'external',
                   onChanged: (value) =>
                       ref.read(settingsProvider.notifier).setAutoplay(value),
                 ),
@@ -147,7 +158,7 @@ class _PlaybackSettingsPageState extends ConsumerState<PlaybackSettingsPage> {
                   title: context.l10n.autoplayPersonalization,
                   subtitle: context.l10n.autoplayPersonalizationDescription,
                   value: settings.autoplayPersonalization,
-                  enabled: settings.playerMode == 'internal',
+                  enabled: settings.playerMode != 'external',
                   onChanged: (value) => ref
                       .read(settingsProvider.notifier)
                       .setAutoplayPersonalization(value),
@@ -177,7 +188,7 @@ class _PlaybackSettingsPageState extends ConsumerState<PlaybackSettingsPage> {
                   subtitle: context.l10n.playbackPauseOnMuteDescription,
                   value: settings.pauseOnMute,
                   enabled:
-                      settings.playerMode == 'internal' &&
+                      settings.playerMode != 'external' &&
                       !settings.usbBitPerfect,
                   onChanged: (value) =>
                       ref.read(settingsProvider.notifier).setPauseOnMute(value),
@@ -188,7 +199,7 @@ class _PlaybackSettingsPageState extends ConsumerState<PlaybackSettingsPage> {
                   subtitle:
                       context.l10n.playbackOnHeadphonesConnectedDescription,
                   value: settings.playOnHeadphonesConnected,
-                  enabled: settings.playerMode == 'internal',
+                  enabled: settings.playerMode != 'external',
                   onChanged: (value) => ref
                       .read(settingsProvider.notifier)
                       .setPlayOnHeadphonesConnected(value),

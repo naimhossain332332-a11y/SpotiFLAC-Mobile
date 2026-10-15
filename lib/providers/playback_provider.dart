@@ -1,11 +1,15 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:spotiflac_android/models/library_collections.dart';
 import 'package:spotiflac_android/models/track.dart';
+import 'package:spotiflac_android/providers/extension_provider.dart';
 import 'package:spotiflac_android/providers/download_queue_provider.dart';
 import 'package:spotiflac_android/providers/music_player_provider.dart';
 import 'package:spotiflac_android/providers/settings_provider.dart';
 import 'package:spotiflac_android/services/library_database.dart';
 import 'package:spotiflac_android/services/history_database.dart';
+import 'package:spotiflac_android/services/download_request_payload.dart';
 import 'package:spotiflac_android/services/music_player_service.dart';
+import 'package:spotiflac_android/services/online_playback_keep.dart';
 import 'package:spotiflac_android/services/platform_bridge.dart';
 import 'package:spotiflac_android/utils/file_access.dart';
 import 'package:spotiflac_android/utils/logger.dart';
@@ -24,12 +28,67 @@ class PlaybackController extends Notifier<PlaybackState> {
   final LibraryDatabase _library;
   final HistoryDatabase _history;
 
+  /// Identities of tracks in the active online queue that are played from the
+  /// temporary download cache, keyed by collection key and by a loose
+  /// title/artist identity. A loved track matching one of these identities is
+  /// kept as a permanent download (see [OnlinePlaybackKeep]).
+  final Map<String, Track> _onlineQueue = {};
+  final Set<String> _keptOnlineTracks = {};
+
   @override
-  PlaybackState build() => const PlaybackState();
+  PlaybackState build() {
+    OnlinePlaybackKeep.instance.register(_keepLovedOnlineTrack);
+    ref.onDispose(() => OnlinePlaybackKeep.instance.register(null));
+    return const PlaybackState();
+  }
+
+  String _looseTrackIdentity(Track track) =>
+      '${track.name}\u0000${track.artistName}'.toLowerCase();
+
+  void _resetOnlineQueue() {
+    _onlineQueue.clear();
+    _keptOnlineTracks.clear();
+  }
+
+  /// Keeps a loved track that is only cached for online playback by enqueuing a
+  /// permanent download. Tracks already available locally are left untouched.
+  Future<void> _keepLovedOnlineTrack(Track track) async {
+    if (_onlineQueue.isEmpty) return;
+    final collectionKey = trackCollectionKey(track);
+    final identity = _looseTrackIdentity(track);
+    final matchKey = _onlineQueue.containsKey(collectionKey)
+        ? collectionKey
+        : (_onlineQueue.containsKey(identity) ? identity : null);
+    if (matchKey == null) return;
+    if (!_keptOnlineTracks.add(matchKey)) return;
+    // Enqueue the original queue entry, which carries the provider identity a
+    // download needs; the loved track may be a synthesized library fallback.
+    final original = _onlineQueue[matchKey]!;
+    try {
+      final existing = (await resolveTrackFilePaths([original])).single;
+      if (existing != null) {
+        _keptOnlineTracks.remove(matchKey);
+        return;
+      }
+      final settings = ref.read(settingsProvider);
+      final service = resolveEffectiveDownloadService(
+        settings.defaultService,
+        ref.read(extensionProvider),
+      );
+      if (service.isEmpty) return;
+      ref.read(downloadQueueProvider.notifier).addToQueue(original, service);
+      _log.d('Keeping loved online track: "${original.name}"');
+    } catch (error) {
+      _keptOnlineTracks.remove(matchKey);
+      _log.w('Failed to keep loved online track: $error');
+    }
+  }
 
   Future<bool> _useInternalPlayer({String? source}) async {
     final mode = ref.read(settingsProvider).playerMode;
-    if (mode != 'internal' && source?.startsWith('network://') != true) {
+    if (mode != 'internal' &&
+        mode != 'online' &&
+        source?.startsWith('network://') != true) {
       return false;
     }
     return await ref.read(musicPlayerControllerProvider).ensureInitialized() !=
@@ -59,6 +118,7 @@ class PlaybackController extends Notifier<PlaybackState> {
     if (isCueVirtualPath(path)) {
       throw Exception(cueVirtualTrackRequiresSplitMessage);
     }
+    _resetOnlineQueue();
 
     if (await _useInternalPlayer(source: path)) {
       _log.d('Playing "$title" in the internal player: $path');
@@ -91,6 +151,7 @@ class PlaybackController extends Notifier<PlaybackState> {
     List<LocalLibraryItem> items, {
     required LocalLibraryItem startItem,
   }) async {
+    _resetOnlineQueue();
     final playable = items
         .where(
           (i) => i.filePath.trim().isNotEmpty && !isCueVirtualPath(i.filePath),
@@ -115,6 +176,7 @@ class PlaybackController extends Notifier<PlaybackState> {
     List<DownloadHistoryItem> items, {
     required DownloadHistoryItem startItem,
   }) async {
+    _resetOnlineQueue();
     final playable = items
         .where(
           (i) => i.filePath.trim().isNotEmpty && !isCueVirtualPath(i.filePath),
@@ -140,6 +202,7 @@ class PlaybackController extends Notifier<PlaybackState> {
     required int startIndex,
     required String externalPath,
   }) async {
+    _resetOnlineQueue();
     if (await _useInternalPlayer(source: externalPath)) {
       final items = queue.toList(growable: false);
       if (items.isEmpty) return;
@@ -152,10 +215,208 @@ class PlaybackController extends Notifier<PlaybackState> {
     }
   }
 
+  DownloadRequestPayload _temporaryPlaybackRequest(Track track) {
+    final settings = ref.read(settingsProvider);
+    if (!settings.useExtensionProviders) {
+      throw StateError('Enable extension providers to use online playback.');
+    }
+
+    final extensionState = ref.read(extensionProvider);
+    final requestedService = track.source?.trim().isNotEmpty == true
+        ? track.source!.trim()
+        : settings.defaultService;
+    final service = resolveEffectiveDownloadService(
+      requestedService,
+      extensionState,
+    );
+    final extension = extensionState.extensions
+        .where(
+          (candidate) =>
+              candidate.enabled &&
+              candidate.hasDownloadProvider &&
+              candidate.id.toLowerCase() == service.toLowerCase(),
+        )
+        .firstOrNull;
+    if (service.isEmpty || extension == null) {
+      throw StateError(
+        'No enabled download provider is available for online playback.',
+      );
+    }
+
+    var outputExt = extension.preferredDownloadOutputExtension?.trim() ?? '';
+    if (outputExt.isNotEmpty && !outputExt.startsWith('.')) {
+      outputExt = '.$outputExt';
+    }
+    outputExt = outputExt.toLowerCase();
+    if (outputExt.isEmpty) {
+      final quality = settings.audioQuality.toLowerCase();
+      if (extension.replacesBuiltInProviders.contains('tidal') &&
+          quality == 'high') {
+        outputExt = '.m4a';
+      } else if (quality == 'alac' || quality.startsWith('aac')) {
+        outputExt = '.m4a';
+      } else if (quality.startsWith('opus')) {
+        outputExt = '.opus';
+      } else if (quality.startsWith('mp3')) {
+        outputExt = '.mp3';
+      } else {
+        outputExt = '.flac';
+      }
+    }
+
+    var providerTrackId = '';
+    final normalizedService = service.toLowerCase();
+    final normalizedSource = track.source?.trim().toLowerCase() ?? '';
+    final separator = track.id.indexOf(':');
+    if (normalizedSource == normalizedService && normalizedSource.isNotEmpty) {
+      providerTrackId = separator >= 0 && separator + 1 < track.id.length
+          ? track.id.substring(separator + 1)
+          : track.id;
+    } else if (separator > 0 &&
+        track.id.substring(0, separator).toLowerCase() == normalizedService) {
+      providerTrackId = track.id.substring(separator + 1);
+    }
+
+    var spotifyId = track.id;
+    var qobuzId = '';
+    var tidalId = '';
+    if (track.id.startsWith('qobuz:')) {
+      qobuzId = track.id.substring(6);
+      if (extension.replacesBuiltInProviders.contains('qobuz')) {
+        spotifyId = '';
+      }
+    } else if (track.id.startsWith('tidal:')) {
+      tidalId = track.id.substring(6);
+      if (extension.replacesBuiltInProviders.contains('tidal')) {
+        spotifyId = '';
+      }
+    }
+
+    return DownloadRequestPayload(
+      isrc: track.isrc ?? '',
+      service: service,
+      downloadProvider: service,
+      providerTrackId: providerTrackId,
+      spotifyId: spotifyId,
+      trackName: track.name,
+      artistName: track.artistName,
+      albumName: track.albumName,
+      albumArtist: track.albumArtist ?? '',
+      coverUrl: track.coverUrl ?? '',
+      outputDir: '',
+      filenameFormat:
+          'Online playback - {provider} - {provider_id} - {quality} - {title}',
+      quality: settings.audioQuality,
+      embedMetadata: false,
+      embedLyrics: false,
+      embedReplayGain: false,
+      postProcessingEnabled: false,
+      autoConvertDownloads: false,
+      trackNumber: track.trackNumber ?? 0,
+      playlistPosition: track.trackNumber ?? 0,
+      discNumber: track.discNumber ?? 0,
+      totalTracks: track.totalTracks ?? 1,
+      totalDiscs: track.totalDiscs ?? 0,
+      releaseDate: track.releaseDate ?? '',
+      durationMs: track.duration * 1000,
+      source: track.source ?? '',
+      genre: track.genre ?? '',
+      label: track.label ?? '',
+      copyright: track.copyright ?? '',
+      composer: track.composer ?? '',
+      comment: track.comment ?? '',
+      explicit: track.isExplicit,
+      albumType: track.albumType ?? '',
+      upc: track.upc ?? '',
+      tidalId: tidalId,
+      qobuzId: qobuzId,
+      deezerId: track.deezerId ?? '',
+      useExtensions: true,
+      useFallback: false,
+      storageMode: 'app',
+      outputExt: outputExt,
+      requiresContainerConversion:
+          outputExt == '.flac' && extension.requiresNativeContainerConversion,
+    );
+  }
+
+  String _temporaryPlaybackSource(Track track) {
+    final key = '${track.source ?? 'default'}:${track.id}';
+    return 'temporary-playback://${Uri.encodeComponent(key)}';
+  }
+
+  Future<void> _playTrackListOnline(
+    List<Track> tracks, {
+    required int startIndex,
+  }) async {
+    final resolvedPaths = await resolveTrackFilePaths(tracks);
+    if (!await _useInternalPlayer(source: resolvedPaths[startIndex])) {
+      throw StateError('The built-in player is unavailable.');
+    }
+    _resetOnlineQueue();
+
+    final queue = <PlayableMedia>[];
+    int? initialIndex;
+    var skippedCueVirtualTrack = false;
+    for (var index = 0; index < tracks.length; index++) {
+      final track = tracks[index];
+      final path = resolvedPaths[index];
+      if (path != null && isCueVirtualPath(path)) {
+        skippedCueVirtualTrack = true;
+        continue;
+      }
+
+      final bool isTemporary = path == null;
+      final request = isTemporary
+          ? _temporaryPlaybackRequest(track).toJson()
+          : null;
+      final source = isTemporary ? _temporaryPlaybackSource(track) : path;
+      if (isTemporary) {
+        // Remember temporary entries so a loving action can keep them.
+        _onlineQueue[trackCollectionKey(track)] = track;
+        _onlineQueue[_looseTrackIdentity(track)] = track;
+      }
+      if (index >= startIndex) initialIndex ??= queue.length;
+      queue.add(
+        PlayableMedia(
+          id: source,
+          source: source,
+          title: track.name,
+          artist: track.artistName,
+          album: track.albumName,
+          artUri: _normalizeArtUri(track.coverUrl ?? ''),
+          duration: track.duration > 0
+              ? Duration(seconds: track.duration)
+              : null,
+          format: request?['output_ext']?.toString().replaceFirst('.', ''),
+          explicit: track.isExplicit,
+          temporaryPlaybackRequest: request,
+        ),
+      );
+    }
+
+    if (queue.isEmpty) {
+      throw Exception(
+        skippedCueVirtualTrack
+            ? cueVirtualTrackRequiresSplitMessage
+            : 'No playable tracks were found in this list.',
+      );
+    }
+    await ref
+        .read(musicPlayerControllerProvider)
+        .playAll(queue, initialIndex: initialIndex ?? 0);
+  }
+
   Future<void> playTrackList(List<Track> tracks, {int startIndex = 0}) async {
     if (tracks.isEmpty) return;
 
     final safeStart = startIndex.clamp(0, tracks.length - 1);
+    if (ref.read(settingsProvider).playerMode == 'online') {
+      await _playTrackListOnline(tracks, startIndex: safeStart);
+      return;
+    }
+    _resetOnlineQueue();
+
     List<String?>? resolvedPaths;
     String? networkSource;
     if (ref.read(settingsProvider).playerMode != 'internal') {

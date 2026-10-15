@@ -4,6 +4,7 @@ import 'package:spotiflac_android/models/track.dart';
 import 'package:spotiflac_android/providers/download_queue_provider.dart';
 import 'package:spotiflac_android/providers/local_library_provider.dart';
 import 'package:spotiflac_android/providers/settings_provider.dart';
+import 'package:spotiflac_android/providers/playback_provider.dart';
 import 'package:spotiflac_android/utils/clickable_metadata.dart';
 import 'package:spotiflac_android/utils/local_playback.dart';
 import 'package:spotiflac_android/widgets/audio_quality_badges.dart';
@@ -21,6 +22,7 @@ class TrackListTile extends ConsumerWidget {
   final Track track;
   final bool isInHistory;
   final void Function({bool forceQualityPicker}) onDownload;
+  final Future<void> Function()? onPlayOnline;
   final Widget leading;
   final bool clickableArtist;
   final bool showQualityBadges;
@@ -35,6 +37,7 @@ class TrackListTile extends ConsumerWidget {
     required this.isInHistory,
     required this.onDownload,
     required this.leading,
+    this.onPlayOnline,
     this.clickableArtist = false,
     this.showQualityBadges = true,
     this.isSelectionMode = false,
@@ -139,9 +142,24 @@ class TrackListTile extends ConsumerWidget {
     required bool isQueued,
     required bool isInLocalLibrary,
   }) async {
+    final settings = ref.read(settingsProvider);
+    if (settings.playerMode == 'online') {
+      try {
+        await (onPlayOnline?.call() ??
+            ref.read(playbackProvider.notifier).playTrackList([track]));
+      } catch (error) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(error.toString().replaceFirst('Exception: ', '')),
+            ),
+          );
+        }
+      }
+      return;
+    }
     if (isQueued) return;
 
-    final settings = ref.read(settingsProvider);
     if (settings.allowQualityVariants && (isInHistory || isInLocalLibrary)) {
       onDownload(forceQualityPicker: true);
       return;

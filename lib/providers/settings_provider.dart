@@ -1065,7 +1065,11 @@ class SettingsNotifier extends Notifier<AppSettings> {
   }
 
   void setPlayerMode(String mode) {
-    final normalized = mode == 'internal' ? 'internal' : 'external';
+    final normalized = switch (mode) {
+      'internal' => 'internal',
+      'online' => 'online',
+      _ => 'external',
+    };
     state = state.copyWith(playerMode: normalized);
     _saveSettings();
   }
