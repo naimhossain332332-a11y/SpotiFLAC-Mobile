@@ -15,6 +15,7 @@ import 'package:spotiflac_android/providers/playback_provider.dart';
 import 'package:spotiflac_android/providers/settings_provider.dart';
 import 'package:spotiflac_android/screens/library_tracks_folder_screen.dart';
 import 'package:spotiflac_android/services/music_player_service.dart';
+import 'package:spotiflac_android/services/online_playback_keep.dart';
 import 'package:spotiflac_android/theme/app_theme.dart';
 import 'package:spotiflac_android/theme/mornye_theme.dart';
 import 'package:spotiflac_android/widgets/track_card.dart';
@@ -161,6 +162,26 @@ class _DownloadSelection extends DownloadQueueNotifier {
   @override
   void addIndividualTracksToQueue(List<Track> tracks, String service) =>
       _record(tracks, service);
+}
+
+class _KeptDownloads extends DownloadQueueNotifier {
+  _KeptDownloads(this._record);
+  final void Function(Track, String) _record;
+
+  @override
+  DownloadQueueState build() => const DownloadQueueState();
+
+  @override
+  String addToQueue(
+    Track track,
+    String service, {
+    String? qualityOverride,
+    String? playlistName,
+    int? playlistPosition,
+  }) {
+    _record(track, service);
+    return 'kept-${track.id}';
+  }
 }
 
 class _DownloadExtensions extends ExtensionNotifier {
@@ -439,6 +460,45 @@ void main() {
       expect(player.queue[1].temporaryPlaybackRequest?['output_dir'], '');
     },
   );
+
+  test('loving an online-playback track keeps it as a download', () async {
+    final kept = <(Track, String)>[];
+    final keepPlayer = _Player();
+    final keepContainer = ProviderContainer(
+      overrides: [
+        settingsProvider.overrideWith(_Settings.new),
+        musicPlayerControllerProvider.overrideWithValue(keepPlayer),
+        playbackProvider.overrideWith(_Playback.new),
+        extensionProvider.overrideWith(_DownloadExtensions.new),
+        downloadQueueProvider.overrideWith(
+          () => _KeptDownloads((track, service) => kept.add((track, service))),
+        ),
+      ],
+    );
+    addTearDown(keepContainer.dispose);
+    keepContainer.read(settingsProvider.notifier).setPlayerMode('online');
+    await keepContainer
+        .read(playbackProvider.notifier)
+        .playTrackList(_tracks, startIndex: 2);
+
+    // A track resolved from the library is not part of the online keep set.
+    OnlinePlaybackKeep.instance.notifyLoved(_tracks[0]);
+    await pumpEventQueue();
+    expect(kept, isEmpty);
+
+    // The temporarily cached track is kept as a permanent download.
+    final unavailable = _tracks[1];
+    OnlinePlaybackKeep.instance.notifyLoved(unavailable);
+    await pumpEventQueue();
+    expect(kept, hasLength(1));
+    expect(kept.single.$1.id, 'Unavailable');
+    expect(kept.single.$2, 'example');
+
+    // Loving the same track again does not enqueue a duplicate download.
+    OnlinePlaybackKeep.instance.notifyLoved(unavailable);
+    await pumpEventQueue();
+    expect(kept, hasLength(1));
+  });
 
   test(
     'missing and virtual CUE tracks do not shift the selected track',

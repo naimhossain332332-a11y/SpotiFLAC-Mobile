@@ -1,4 +1,5 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:spotiflac_android/models/library_collections.dart';
 import 'package:spotiflac_android/models/track.dart';
 import 'package:spotiflac_android/providers/extension_provider.dart';
 import 'package:spotiflac_android/providers/download_queue_provider.dart';
@@ -8,6 +9,7 @@ import 'package:spotiflac_android/services/library_database.dart';
 import 'package:spotiflac_android/services/history_database.dart';
 import 'package:spotiflac_android/services/download_request_payload.dart';
 import 'package:spotiflac_android/services/music_player_service.dart';
+import 'package:spotiflac_android/services/online_playback_keep.dart';
 import 'package:spotiflac_android/services/platform_bridge.dart';
 import 'package:spotiflac_android/utils/file_access.dart';
 import 'package:spotiflac_android/utils/logger.dart';
@@ -26,8 +28,61 @@ class PlaybackController extends Notifier<PlaybackState> {
   final LibraryDatabase _library;
   final HistoryDatabase _history;
 
+  /// Identities of tracks in the active online queue that are played from the
+  /// temporary download cache, keyed by collection key and by a loose
+  /// title/artist identity. A loved track matching one of these identities is
+  /// kept as a permanent download (see [OnlinePlaybackKeep]).
+  final Map<String, Track> _onlineQueue = {};
+  final Set<String> _keptOnlineTracks = {};
+
   @override
-  PlaybackState build() => const PlaybackState();
+  PlaybackState build() {
+    OnlinePlaybackKeep.instance.register(_keepLovedOnlineTrack);
+    ref.onDispose(() => OnlinePlaybackKeep.instance.register(null));
+    return const PlaybackState();
+  }
+
+  String _looseTrackIdentity(Track track) =>
+      '${track.name}\u0000${track.artistName}'.toLowerCase();
+
+  void _resetOnlineQueue() {
+    _onlineQueue.clear();
+    _keptOnlineTracks.clear();
+  }
+
+  /// Keeps a loved track that is only cached for online playback by enqueuing a
+  /// permanent download. Tracks already available locally are left untouched.
+  Future<void> _keepLovedOnlineTrack(Track track) async {
+    if (_onlineQueue.isEmpty) return;
+    final collectionKey = trackCollectionKey(track);
+    final identity = _looseTrackIdentity(track);
+    final matchKey = _onlineQueue.containsKey(collectionKey)
+        ? collectionKey
+        : (_onlineQueue.containsKey(identity) ? identity : null);
+    if (matchKey == null) return;
+    if (!_keptOnlineTracks.add(matchKey)) return;
+    // Enqueue the original queue entry, which carries the provider identity a
+    // download needs; the loved track may be a synthesized library fallback.
+    final original = _onlineQueue[matchKey]!;
+    try {
+      final existing = (await resolveTrackFilePaths([original])).single;
+      if (existing != null) {
+        _keptOnlineTracks.remove(matchKey);
+        return;
+      }
+      final settings = ref.read(settingsProvider);
+      final service = resolveEffectiveDownloadService(
+        settings.defaultService,
+        ref.read(extensionProvider),
+      );
+      if (service.isEmpty) return;
+      ref.read(downloadQueueProvider.notifier).addToQueue(original, service);
+      _log.d('Keeping loved online track: "${original.name}"');
+    } catch (error) {
+      _keptOnlineTracks.remove(matchKey);
+      _log.w('Failed to keep loved online track: $error');
+    }
+  }
 
   Future<bool> _useInternalPlayer({String? source}) async {
     final mode = ref.read(settingsProvider).playerMode;
@@ -63,6 +118,7 @@ class PlaybackController extends Notifier<PlaybackState> {
     if (isCueVirtualPath(path)) {
       throw Exception(cueVirtualTrackRequiresSplitMessage);
     }
+    _resetOnlineQueue();
 
     if (await _useInternalPlayer(source: path)) {
       _log.d('Playing "$title" in the internal player: $path');
@@ -95,6 +151,7 @@ class PlaybackController extends Notifier<PlaybackState> {
     List<LocalLibraryItem> items, {
     required LocalLibraryItem startItem,
   }) async {
+    _resetOnlineQueue();
     final playable = items
         .where(
           (i) => i.filePath.trim().isNotEmpty && !isCueVirtualPath(i.filePath),
@@ -119,6 +176,7 @@ class PlaybackController extends Notifier<PlaybackState> {
     List<DownloadHistoryItem> items, {
     required DownloadHistoryItem startItem,
   }) async {
+    _resetOnlineQueue();
     final playable = items
         .where(
           (i) => i.filePath.trim().isNotEmpty && !isCueVirtualPath(i.filePath),
@@ -144,6 +202,7 @@ class PlaybackController extends Notifier<PlaybackState> {
     required int startIndex,
     required String externalPath,
   }) async {
+    _resetOnlineQueue();
     if (await _useInternalPlayer(source: externalPath)) {
       final items = queue.toList(growable: false);
       if (items.isEmpty) return;
@@ -294,6 +353,7 @@ class PlaybackController extends Notifier<PlaybackState> {
     if (!await _useInternalPlayer(source: resolvedPaths[startIndex])) {
       throw StateError('The built-in player is unavailable.');
     }
+    _resetOnlineQueue();
 
     final queue = <PlayableMedia>[];
     int? initialIndex;
@@ -310,7 +370,12 @@ class PlaybackController extends Notifier<PlaybackState> {
       final request = isTemporary
           ? _temporaryPlaybackRequest(track).toJson()
           : null;
-      final source = isTemporary ? _temporaryPlaybackSource(track) : path!;
+      final source = isTemporary ? _temporaryPlaybackSource(track) : path;
+      if (isTemporary) {
+        // Remember temporary entries so a loving action can keep them.
+        _onlineQueue[trackCollectionKey(track)] = track;
+        _onlineQueue[_looseTrackIdentity(track)] = track;
+      }
       if (index >= startIndex) initialIndex ??= queue.length;
       queue.add(
         PlayableMedia(
@@ -350,6 +415,7 @@ class PlaybackController extends Notifier<PlaybackState> {
       await _playTrackListOnline(tracks, startIndex: safeStart);
       return;
     }
+    _resetOnlineQueue();
 
     List<String?>? resolvedPaths;
     String? networkSource;

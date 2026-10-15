@@ -10,6 +10,7 @@ import 'package:spotiflac_android/services/ffmpeg_service.dart';
 import 'package:spotiflac_android/services/library_collections_database.dart';
 import 'package:spotiflac_android/services/library_collections_hydration.dart';
 import 'package:spotiflac_android/services/collection_track_batch.dart';
+import 'package:spotiflac_android/services/online_playback_keep.dart';
 import 'package:spotiflac_android/utils/logger.dart';
 
 export 'package:spotiflac_android/models/library_collections.dart';
@@ -173,6 +174,7 @@ class LibraryCollectionsNotifier extends Notifier<LibraryCollectionsState> {
       required String addedAt,
     })
     dbUpsert,
+    void Function(Track track)? onAdded,
   }) => _mutate(() async {
     final key = trackCollectionKey(track);
     if (contains(key)) {
@@ -197,6 +199,7 @@ class LibraryCollectionsNotifier extends Notifier<LibraryCollectionsState> {
       addedAt: entry.addedAt.toIso8601String(),
     );
     if (ref.mounted) state = withList([entry, ...select(state)]);
+    onAdded?.call(track);
     return true;
   });
 
@@ -216,6 +219,7 @@ class LibraryCollectionsNotifier extends Notifier<LibraryCollectionsState> {
     withList: (list) => state.copyWith(loved: list),
     dbDelete: _db.deleteLovedEntry,
     dbUpsert: _db.upsertLovedEntry,
+    onAdded: OnlinePlaybackKeep.instance.notifyLoved,
   );
 
   /// One selection is one mutation: mixed selections add only missing tracks,
@@ -264,6 +268,9 @@ class LibraryCollectionsNotifier extends Notifier<LibraryCollectionsState> {
         state = state.copyWith(
           loved: [...prepared.entries.reversed, ...state.loved],
         );
+      }
+      for (final entry in prepared.entries) {
+        OnlinePlaybackKeep.instance.notifyLoved(entry.track);
       }
       return (removed: false, count: prepared.entries.length);
     } finally {

@@ -410,6 +410,9 @@ class MusicPlayerHandler extends BaseAudioHandler
     AutoplayLibraryLoader? autoplayLibraryLoader,
   }) : _runtime = runtime ?? musicPlayerRuntime {
     _sourceCache = ContentUriPlaybackCache(
+      // Hold the active copy plus the online prefetch window without evicting
+      // an upcoming track before it can play.
+      maxEntries: _onlinePrefetchAhead + 2,
       copy: _copyPlaybackCacheSource,
       isDisposed: () => _disposed,
       isPinned: (path) =>
@@ -1113,28 +1116,40 @@ class MusicPlayerHandler extends BaseAudioHandler
     return null;
   }
 
+  /// How many upcoming online tracks to prepare ahead of the current one.
+  /// The files are temporary playback copies, not permanent downloads.
+  static const int _onlinePrefetchAhead = 3;
+
   Future<void> _prefetchNextTemporaryPlayback(int generation) async {
     if (_disposed || generation != _playRequestGeneration || _media.isEmpty) {
       return;
     }
-    var nextIndex = _index + 1;
-    if (nextIndex >= _media.length &&
-        _repeatMode == AudioServiceRepeatMode.all) {
-      nextIndex = 0;
+    var prefetched = false;
+    // Prepare the nearest upcoming tracks first so the next one is always
+    // ready. Each resolve is a full temporary download, so keep them serial.
+    for (var step = 1; step <= _onlinePrefetchAhead; step++) {
+      if (_disposed || generation != _playRequestGeneration) return;
+      var nextIndex = _index + step;
+      if (nextIndex >= _media.length) {
+        if (_repeatMode != AudioServiceRepeatMode.all) break;
+        nextIndex -= _media.length;
+      }
+      if (nextIndex < 0 || nextIndex >= _media.length || nextIndex == _index) {
+        break;
+      }
+      final next = _media[nextIndex];
+      if (!next.isTemporaryPlayback) continue;
+      final source = next.source;
+      if (_sourceCache.cachedPath(source) != null) continue;
+      final path = await _sourceCache.resolve(source);
+      if (path == null) continue;
+      if (_disposed || generation != _playRequestGeneration) {
+        await _sourceCache.invalidate(source);
+        return;
+      }
+      prefetched = true;
     }
-    if (nextIndex < 0 || nextIndex >= _media.length || nextIndex == _index) {
-      return;
-    }
-    final next = _media[nextIndex];
-    if (!next.isTemporaryPlayback) return;
-    final source = next.source;
-    final path = await _sourceCache.resolve(source);
-    if (path == null) return;
-    if (_disposed || generation != _playRequestGeneration) {
-      await _sourceCache.invalidate(source);
-      return;
-    }
-    await _cleanupPendingResolvedPaths();
+    if (prefetched) await _cleanupPendingResolvedPaths();
   }
 
   Future<void> _clearTemporaryPlaybackCache() async {
